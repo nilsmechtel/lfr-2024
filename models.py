@@ -279,10 +279,6 @@ class DatasetDistillation(pl.LightningModule):
             )
             return distillation_loss
 
-    def on_train_epoch_end(self):
-        """Scale distilled data to [0, 1] after each epoch."""
-        self.distilled_data = nn.Parameter(torch.clamp(self.distilled_data, 0, 1))
-
     def validation_step(self, batch, batch_idx):
         """Define the validation step."""
         x, y = batch
