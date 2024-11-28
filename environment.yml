@@ -1,0 +1,11 @@
+name: lfr
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pytorch-lightning
+  - torchvision
+  - wandb
+  - python-dotenv
+  - seaborn
