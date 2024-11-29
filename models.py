@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 import wandb
 
@@ -50,6 +51,8 @@ class DatasetDistillation(pl.LightningModule):
         latent_dim: int = 64,
         n_classes: int = 10,  # Number of classes in MNIST
         num_distilled_data: int = 300,  # Size of the distilled dataset
+        prime_proportion: float = 0.0,
+        prime_data_loader: DataLoader = None,
         classification_scale: float = 1.0,
         reconstruction_scale: float = 1.0,
         gradient_penalty_scale: float = 1.0,
@@ -72,7 +75,12 @@ class DatasetDistillation(pl.LightningModule):
         self.model_head = model_head_cls(latent_dim, n_classes)
 
         # Distilled data as trainable parameters (range [0, 1])
-        self.distilled_data = nn.Parameter(torch.rand(num_distilled_data, input_dim))
+        self.distilled_data = self.initialize_distilled_data(
+            num_distilled_data,
+            input_dim,
+            prime_proportion,
+            prime_data_loader,
+        )
 
         # Scaling parameters
         self.classification_scale = classification_scale
@@ -104,6 +112,29 @@ class DatasetDistillation(pl.LightningModule):
                 "Invalid training mode. Must be 'pretrain' or 'distillation'."
             )
         self._training_mode = value
+
+    def initialize_distilled_data(
+        self,
+        num_distilled_data: int,
+        input_dim: int,
+        prime_proportion: float,
+        prime_data_loader: DataLoader,
+    ):
+        """Create the distilled data with a random sample from the data loader."""
+        distilled_data = torch.rand(num_distilled_data, input_dim)
+
+        if prime_proportion > 0:
+            indices = torch.randperm(len(prime_data_loader.dataset))[
+                :num_distilled_data
+            ]
+            prime_data = torch.cat(
+                [prime_data_loader.dataset[idx][0][None, :] for idx in indices]
+            )
+            distilled_data = (
+                prime_proportion * prime_data + (1 - prime_proportion) * distilled_data
+            )
+
+        return nn.Parameter(distilled_data)
 
     def forward(self, x):
         """Forward pass through the autoencoder and model head."""
@@ -258,10 +289,21 @@ class DatasetDistillation(pl.LightningModule):
             )
 
             # Increase weights over time
-            reconstruction_weight = min(1, ((self.current_epoch + 1) / self.increase_reconstruction_over))
-            self.log("train_reconstruction_weight", reconstruction_weight, on_step=False, on_epoch=True)
-            diversity_weight = min(1, ((self.current_epoch + 1) / self.increase_diversity_over))
-            self.log("train_diversity_weight", diversity_weight, on_step=False, on_epoch=True)
+            reconstruction_weight = min(
+                1, ((self.current_epoch + 1) / self.increase_reconstruction_over)
+            )
+            self.log(
+                "train_reconstruction_weight",
+                reconstruction_weight,
+                on_step=False,
+                on_epoch=True,
+            )
+            diversity_weight = min(
+                1, ((self.current_epoch + 1) / self.increase_diversity_over)
+            )
+            self.log(
+                "train_diversity_weight", diversity_weight, on_step=False, on_epoch=True
+            )
 
             # Combined loss
             distillation_loss = (
@@ -346,7 +388,10 @@ class DatasetDistillation(pl.LightningModule):
             return accuracy
 
     def on_validation_epoch_end(self):
-        if self.training_mode == "distillation" and self.current_epoch % self.log_image_every == 0:
+        if (
+            self.training_mode == "distillation"
+            and self.current_epoch % self.log_image_every == 0
+        ):
             # Normalize contingency table (avoid division by zero)
             contingency_table = self.contingency_table / (
                 self.contingency_table.sum(dim=1, keepdim=True) + 1e-6
@@ -371,6 +416,9 @@ if __name__ == "__main__":
     # Initialize model
     model = DatasetDistillation(training_mode="pretrain")
     print(model)
+
+    # Prime distilled data
+    model.prime_distilled_data(train_loader)
 
     # Test model training steps
     loss = model.training_step((x, y), 0)
