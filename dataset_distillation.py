@@ -45,6 +45,8 @@ def main(args):
         learning_rate_ae=args.learning_rate_ae,
         learning_rate_distill=args.learning_rate_distill,
         log_image_every=args.log_image_every,
+        feature_extractor_cls=args.feature_extractor_cls,
+        model_head_cls=args.model_head_cls,
     )
 
     # Pretraining phase
@@ -71,9 +73,10 @@ def main(args):
         )
 
         # Model checkpoint for pretraining
+        filename = f"feature_extractor_{args.feature_extractor_cls.lower()}_latent_dim_{args.latent_dim}"
         checkpoint_callback = ModelCheckpoint(
             dirpath=args.checkpoint_path,
-            filename=f"feature_extractor_latent_dim_{args.latent_dim}",
+            filename=filename,
             monitor="val_ae_loss",
             mode="min",
             save_top_k=1,
@@ -139,14 +142,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prime_distilled_data_proportion",
         type=float,
-        default=0.5,
+        default=0.25,
         help="Proportion of distilled data to prime",
     )
     parser.add_argument(
         "--classification_scale", type=float, default=1.0, help="Classification scale"
     )
     parser.add_argument(
-        "--reconstruction_scale", type=float, default=100.0, help="Reconstruction scale"
+        "--reconstruction_scale", type=float, default=5.0, help="Reconstruction scale"
     )
     parser.add_argument(
         "--gradient_penalty_scale",
@@ -155,12 +158,12 @@ if __name__ == "__main__":
         help="Gradient penalty scale",
     )
     parser.add_argument(
-        "--diversity_scale", type=float, default=3.0, help="Diversity scale"
+        "--diversity_scale", type=float, default=1.0, help="Diversity scale"
     )
     parser.add_argument(
         "--increase_reconstruction_over",
         type=int,
-        default=100,
+        default=50,
         help="Increase reconstruction scale over n epochs",
     )
     parser.add_argument(
@@ -207,6 +210,20 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Only perform pretraining",
+    )
+    parser.add_argument(
+        "--feature_extractor_cls",
+        type=str,
+        default="WeightSharedAutoencoder",
+        choices=["Autoencoder", "WeightSharedAutoencoder", "GRBM"],
+        help="Feature extractor class name",
+    )
+    parser.add_argument(
+        "--model_head_cls",
+        type=str,
+        default="LinearClassifier",
+        choices=["LinearClassifier"],
+        help="Model head class name",
     )
     parser.add_argument("--gpu_id", type=str, default="2", help="GPU ID")
     args = parser.parse_args()

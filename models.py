@@ -4,11 +4,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 import wandb
+from typing import Literal
 
 from visualisation import create_image_grid, plot_contingency_table
 
 
-class FeatureExtractor(nn.Module):
+class Autoencoder(nn.Module):
     def __init__(self, input_dim: int, latent_dim: int):
         super().__init__()
         self.encoder = nn.Sequential(nn.Linear(input_dim, latent_dim), nn.ReLU())
@@ -20,6 +21,7 @@ class FeatureExtractor(nn.Module):
     def forward(self, x):
         """
         Forward pass through the autoencoder.
+
         Returns:
             - reconstructed: The reconstructed input.
             - latent: The latent representation of the input.
@@ -27,6 +29,130 @@ class FeatureExtractor(nn.Module):
         latent = self.encoder(x)
         reconstructed = self.decoder(latent)
         return reconstructed, latent
+
+    def reconstruction_loss(self, x):
+        """
+        Compute reconstruction loss (mean squared error).
+
+        Args:
+            x (Tensor): Input tensor.
+        Returns:
+            loss (Tensor): Reconstruction loss.
+        """
+        reconstructed, _ = self.forward(x)
+        return F.mse_loss(reconstructed, x)
+
+
+class WeightSharedAutoencoder(nn.Module):
+    def __init__(self, input_dim, latent_dim):
+        super().__init__()
+        self.encoder = nn.Linear(input_dim, latent_dim)
+        self.decoder_bias = nn.Parameter(
+            torch.zeros(input_dim)
+        )  # Separate decoder bias
+
+    def forward(self, x):
+        """
+        Forward pass through the autoencoder.
+
+        Returns:
+            - reconstructed: The reconstructed input.
+            - latent: The latent representation of the input.
+        """
+        latent = torch.relu(self.encoder(x))
+        reconstructed = torch.sigmoid(
+            torch.matmul(latent, self.encoder.weight) + self.decoder_bias
+        )
+        return reconstructed, latent
+
+    def reconstruction_loss(self, x):
+        """
+        Compute reconstruction loss (mean squared error).
+
+        Args:
+            x (Tensor): Input tensor.
+        Returns:
+            loss (Tensor): Reconstruction loss.
+        """
+        reconstructed, _ = self.forward(x)
+        return F.mse_loss(reconstructed, x)
+
+
+class GRBM(nn.Module):
+    def __init__(self, visible_dim, hidden_dim, sigma=1.0):
+        """
+        Gaussian Restricted Boltzmann Machine (GRBM) with visible and hidden layers.
+
+        Args:
+            visible_dim (int): Number of visible units.
+            hidden_dim (int): Number of hidden units.
+            sigma (float): Standard deviation of the Gaussian noise.
+        """
+        super(GRBM, self).__init__()
+        self.visible_dim = visible_dim
+        self.hidden_dim = hidden_dim
+        self.sigma = sigma  # Standard deviation for visible units
+
+        # Weight and bias initialization
+        self.W = nn.Parameter(torch.randn(hidden_dim, visible_dim) * 0.01)
+        self.b_v = nn.Parameter(torch.zeros(visible_dim))  # Bias for visible units
+        self.b_h = nn.Parameter(torch.zeros(hidden_dim))  # Bias for hidden units
+
+    def sample_hidden(self, v):
+        """
+        Sample the hidden units given visible units.
+
+        Args:
+            v (Tensor): Input tensor for visible units.
+        Returns:
+            h_prob (Tensor): Probabilities of hidden units being activated.
+            h_sample (Tensor): Sampled hidden units.
+        """
+        h_prob = torch.sigmoid(F.linear(v, self.W, self.b_h))
+        h_sample = torch.bernoulli(h_prob)
+        return h_prob, h_sample
+
+    def sample_visible(self, h):
+        """
+        Sample the visible units given hidden units.
+
+        Args:
+            h (Tensor): Input tensor for hidden units.
+        Returns:
+            v_mean (Tensor): Reconstructed visible units (mean).
+            v_sample (Tensor): Sampled visible units.
+        """
+        v_mean = F.linear(h, self.W.t(), self.b_v)
+        v_sample = v_mean + torch.randn_like(v_mean) * self.sigma
+        return v_mean, v_sample
+
+    def forward(self, v):
+        """
+        Perform one step of Gibbs sampling.
+
+        Args:
+            v (Tensor): Input tensor for visible units.
+        Returns:
+            v_mean (Tensor): Reconstructed visible units (mean).
+            h_prob (Tensor): Probabilities of hidden units being activated.
+        """
+        h_prob, h_sample = self.sample_hidden(v)
+        v_mean, _ = self.sample_visible(h_sample)
+        return v_mean, h_prob
+
+    def reconstruction_loss(self, v):
+        """
+        Compute the Negative Log-Likelihood (NLL) loss for Gaussian visible units.
+
+        Args:
+            v (Tensor): Input tensor for visible units.
+        Returns:
+            loss (Tensor): NLL reconstruction loss.
+        """
+        # Perform one step of Gibbs sampling to get reconstructed visible units
+        v_mean, _ = self.forward(v)
+        loss = F.gaussian_nll_loss(v_mean, v, torch.ones_like(v) * self.sigma, reduction="mean")
+        return loss
 
 
 class LinearClassifier(nn.Module):
@@ -37,11 +163,25 @@ class LinearClassifier(nn.Module):
     def forward(self, latent):
         """
         Forward pass through the model head.
+
         Returns:
             - logits: Output logits for classification.
         """
         logits = self.head(latent)
         return logits
+
+    def classification_loss(self, latent, labels):
+        """
+        Compute classification loss (cross-entropy).
+
+        Args:
+            latent (Tensor): Latent feature vector.
+            labels (Tensor): Ground truth class indices.
+        Returns:
+            loss (Tensor): Classification loss.
+        """
+        logits = self.forward(latent)
+        return F.cross_entropy(logits, labels)
 
 
 class DatasetDistillation(pl.LightningModule):
@@ -62,16 +202,26 @@ class DatasetDistillation(pl.LightningModule):
         weight_decay: float = 1e-4,
         learning_rate_ae: float = 1e-3,
         learning_rate_distill: float = 1e-4,
-        training_mode: str = "distillation",  # "pretrain" or "distillation"
+        training_mode: Literal["pretrain", "distillation"] = "distillation",
         log_image_every: int = 10,
-        feature_extractor_cls=FeatureExtractor,
-        model_head_cls=LinearClassifier,
+        feature_extractor_cls: Literal[
+            "Autoencoder", "WeightSharedAutoencoder", "GRBM"
+        ] = "WeightSharedAutoencoder",
+        model_head_cls: Literal["LinearClassifier"] = "LinearClassifier",
     ):
         super().__init__()
         self.save_hyperparameters()
 
         # Model components
+        feature_extractor_cls = {
+            "Autoencoder": Autoencoder,
+            "WeightSharedAutoencoder": WeightSharedAutoencoder,
+            "GRBM": GRBM,
+        }[feature_extractor_cls]
         self.feature_extractor = feature_extractor_cls(input_dim, latent_dim)
+        model_head_cls = {
+            "LinearClassifier": LinearClassifier,
+        }[model_head_cls]
         self.model_head = model_head_cls(latent_dim, n_classes)
 
         # Distilled data as trainable parameters (range [0, 1])
@@ -123,7 +273,7 @@ class DatasetDistillation(pl.LightningModule):
         """Create the distilled data with a random sample from the data loader."""
         distilled_data = torch.rand(num_distilled_data, input_dim)
 
-        if prime_proportion > 0:
+        if prime_proportion > 0 and prime_data_loader is not None:
             indices = torch.randperm(len(prime_data_loader.dataset))[
                 :num_distilled_data
             ]
@@ -142,21 +292,18 @@ class DatasetDistillation(pl.LightningModule):
         logits = self.model_head(z)
         return reconstructed, logits
 
-    def reconstruction_loss(self, reconstructed, x):
-        """MSE reconstruction loss."""
-        return F.mse_loss(reconstructed, x)
+    def reconstruction_loss(self, x):
+        """Feature extractor reconstruction loss."""
+        return self.feature_extractor.reconstruction_loss(x)
 
-    def classification_loss(self, logits, labels):
+    def classification_loss(self, latent, labels):
         """Cross-entropy classification loss."""
-        return F.cross_entropy(logits, labels)
+        return self.model_head.classification_loss(latent, labels)
 
     def penalizer_term(self):
         """Penalizer term based on gradients of the autoencoder."""
         # Compute MSE loss between reconstructed and original distilled data
-        reconstructed_distilled, _ = self.feature_extractor(self.distilled_data)
-        mse_loss = self.reconstruction_loss(
-            reconstructed_distilled, self.distilled_data
-        )
+        mse_loss = self.reconstruction_loss(self.distilled_data)
 
         # Compute gradients of the loss with respect to the distilled data
         # Construct graph of the derivative to allow computing higher order derivative products.
@@ -242,19 +389,19 @@ class DatasetDistillation(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """Define the training step."""
         x, y = batch
-        reconstructed, logits = self.forward(x)
 
         if self.training_mode == "pretrain":
             # Pretrain autoencoder on reconstruction
-            ae_loss = self.reconstruction_loss(reconstructed, x)
+            ae_loss = self.reconstruction_loss(x)
             self.log("train_ae_loss", ae_loss, on_step=False, on_epoch=True)
             return ae_loss
         else:
             # Dataset distillation training
 
             # Classification loss
+            _, z = self.feature_extractor(x)
             classification_loss = self.classification_scale * self.classification_loss(
-                logits, y
+                z, y
             )
             self.log(
                 "train_classification_loss",
@@ -264,9 +411,8 @@ class DatasetDistillation(pl.LightningModule):
             )
 
             # Reconstruction loss
-            reconstructed_distilled, _ = self.feature_extractor(self.distilled_data)
             reconstruction_loss = self.reconstruction_scale * self.reconstruction_loss(
-                reconstructed_distilled, self.distilled_data
+                self.distilled_data
             )
             self.log(
                 "train_reconstruction_loss",
@@ -359,7 +505,7 @@ class DatasetDistillation(pl.LightningModule):
 
         if self.training_mode == "pretrain":
             # Log autoencoder reconstruction loss
-            ae_loss = self.reconstruction_loss(reconstructed, x)
+            ae_loss = self.reconstruction_loss(x)
             self.log("val_ae_loss", ae_loss, on_step=False, on_epoch=True)
 
             return ae_loss
@@ -413,12 +559,24 @@ if __name__ == "__main__":
     print(x.shape)
     print(y.shape)
 
+    # Test autoencoder
+    autoencoder = Autoencoder(784, 64)
+    print(autoencoder)
+    loss = autoencoder.reconstruction_loss(x)
+
+    # Test weight-shared autoencoder
+    wsae = WeightSharedAutoencoder(784, 64)
+    print(wsae)
+    loss = wsae.reconstruction_loss(x)
+
+    # Test GRBM
+    grbm = GRBM(784, 64)
+    print(grbm)
+    loss = grbm.reconstruction_loss(x)
+
     # Initialize model
     model = DatasetDistillation(training_mode="pretrain")
     print(model)
-
-    # Prime distilled data
-    model.prime_distilled_data(train_loader)
 
     # Test model training steps
     loss = model.training_step((x, y), 0)
@@ -430,11 +588,11 @@ if __name__ == "__main__":
 
     # Test image creation
     image = create_image_grid(torch.cat([x[:10], x[-10:]]))
-    image_data = np.array(image.image)
+    image_data = np.array(wandb.Image(image).image)
     pil_image = Image.fromarray(image_data)
     pil_image.save("test_image.png")
 
     image = create_image_grid(model.distilled_data[:80])
-    image_data = np.array(image.image)
+    image_data = image_data = np.array(wandb.Image(image).image)
     pil_image = Image.fromarray(image_data)
     pil_image.save("test_image_distilled.png")

@@ -19,6 +19,7 @@ def scale(data, eps=1e-6):
     sample_maxs = data.max(dim=-1, keepdim=True)[0]
     return (data - sample_mins) / (sample_maxs - sample_mins + eps)
 
+
 def create_image_grid(tensor, images_per_row=10, total_rows=8):
     """
     Create an image grid with the given flattened tensor.
@@ -38,7 +39,7 @@ def create_image_grid(tensor, images_per_row=10, total_rows=8):
         batch_size = tensor.size(0)
         images_to_show = min(batch_size, total_rows * images_per_row)
         tensor = tensor[:images_to_show]
-        
+
         # Normalize to [0, 1] for visualization
         tensor = scale(tensor)
 
@@ -60,7 +61,7 @@ def plot_contingency_table(contingency_table):
     # Plot contingency table as a heatmap with labels
     fig, ax = plt.subplots()
     sns.heatmap(contingency_table, cmap="viridis", ax=ax)
-    ax.xaxis.set_label_position('top') 
+    ax.xaxis.set_label_position("top")
     ax.xaxis.tick_top()
     plt.tight_layout()
     return fig

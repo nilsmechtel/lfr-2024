@@ -19,10 +19,12 @@ def prepare_mnist_data(batch_size=128, val_split=0.1, num_workers=10):
         val_loader (DataLoader): DataLoader for validation dataset.
     """
     # Define transforms for images
-    transform = transforms.Compose([
-        transforms.ToTensor(),  # Converts to [0, 1] and shape [1, 28, 28]
-        transforms.Lambda(lambda x: x.view(-1))  # Flatten to shape [784]
-    ])
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),  # Converts to [0, 1] and shape [1, 28, 28]
+            transforms.Lambda(lambda x: x.view(-1)),  # Flatten to shape [784]
+        ]
+    )
 
     # Use target_transform for one-hot encoding labels
     def target_transform(label):
@@ -30,7 +32,11 @@ def prepare_mnist_data(batch_size=128, val_split=0.1, num_workers=10):
 
     # Load MNIST dataset
     mnist_dataset = datasets.MNIST(
-        root="./data", train=True, download=True, transform=transform, target_transform=target_transform
+        root="./data",
+        train=True,
+        download=True,
+        transform=transform,
+        target_transform=target_transform,
     )
 
     # Split into training and validation datasets
@@ -39,8 +45,20 @@ def prepare_mnist_data(batch_size=128, val_split=0.1, num_workers=10):
     train_dataset, val_dataset = random_split(mnist_dataset, [train_size, val_size])
 
     # Create DataLoaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, pin_memory=True)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=True,
+        pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=False,
+        pin_memory=True,
+    )
 
     return train_loader, val_loader
 
