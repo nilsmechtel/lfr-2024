@@ -39,8 +39,8 @@ def main(args):
         gradient_penalty_scale=args.gradient_penalty_scale,
         reconstruction_scale=args.reconstruction_scale,
         diversity_scale=args.diversity_scale,
-        increase_reconstruction_over=args.increase_reconstruction_over,
-        increase_diversity_over=args.increase_diversity_over,
+        schedule_reconstruction_weight=args.schedule_reconstruction_weight,
+        schedule_diversity_weight=args.schedule_diversity_weight,
         weight_decay=args.weight_decay,
         learning_rate_ae=args.learning_rate_ae,
         learning_rate_distill=args.learning_rate_distill,
@@ -149,7 +149,7 @@ if __name__ == "__main__":
         "--classification_scale", type=float, default=1.0, help="Classification scale"
     )
     parser.add_argument(
-        "--reconstruction_scale", type=float, default=5.0, help="Reconstruction scale"
+        "--reconstruction_scale", type=float, default=1.0, help="Reconstruction scale"
     )
     parser.add_argument(
         "--gradient_penalty_scale",
@@ -161,16 +161,18 @@ if __name__ == "__main__":
         "--diversity_scale", type=float, default=1.0, help="Diversity scale"
     )
     parser.add_argument(
-        "--increase_reconstruction_over",
-        type=int,
-        default=50,
-        help="Increase reconstruction scale over n epochs",
+        "--schedule_reconstruction_weight",
+        nargs="+",
+        type=list,
+        default=[0, 100],
+        help="Increase reconstruction scale over n epochs, then decrease over n epochs",
     )
     parser.add_argument(
-        "--increase_diversity_over",
-        type=int,
-        default=30,
-        help="Increase diversity scale over n epochs",
+        "--schedule_diversity_weight",
+        nargs="+",
+        type=list,
+        default=[0, 0],
+        help="Increase diversity scale over n epochs, then decrease over n epochs",
     )
     parser.add_argument(
         "--weight_decay",
@@ -215,7 +217,13 @@ if __name__ == "__main__":
         "--feature_extractor_cls",
         type=str,
         default="WeightSharedAutoencoder",
-        choices=["Autoencoder", "WeightSharedAutoencoder", "GRBM"],
+        choices=[
+            "Autoencoder",
+            "WeightSharedAutoencoder",
+            "Autoencoder2L",
+            "WeightSharedAutoencoder2L",
+            "GRBM",
+        ],
         help="Feature extractor class name",
     )
     parser.add_argument(

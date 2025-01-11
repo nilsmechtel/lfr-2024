@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -63,6 +64,88 @@ class WeightSharedAutoencoder(nn.Module):
         reconstructed = torch.sigmoid(
             torch.matmul(latent, self.encoder.weight) + self.decoder_bias
         )
+        return reconstructed, latent
+
+    def reconstruction_loss(self, x):
+        """
+        Compute reconstruction loss (mean squared error).
+
+        Args:
+            x (Tensor): Input tensor.
+        Returns:
+            loss (Tensor): Reconstruction loss.
+        """
+        reconstructed, _ = self.forward(x)
+        return F.mse_loss(reconstructed, x)
+
+
+class Autoencoder2L(nn.Module):
+    def __init__(self, input_dim: int, latent_dim: int):
+        hidden_dim = sum([input_dim, latent_dim]) // 2
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, latent_dim),
+            nn.ReLU(),
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, input_dim),
+            nn.Sigmoid(),  # Assumes input is normalized to [0, 1]
+        )
+
+    def forward(self, x):
+        """
+        Forward pass through the autoencoder.
+
+        Returns:
+            - reconstructed: The reconstructed input.
+            - latent: The latent representation of the input.
+        """
+        latent = self.encoder(x)
+        reconstructed = self.decoder(latent)
+        return reconstructed, latent
+
+    def reconstruction_loss(self, x):
+        """
+        Compute reconstruction loss (mean squared error).
+
+        Args:
+            x (Tensor): Input tensor.
+        Returns:
+            loss (Tensor): Reconstruction loss.
+        """
+        reconstructed, _ = self.forward(x)
+        return F.mse_loss(reconstructed, x)
+
+
+class WeightSharedAutoencoder2L(nn.Module):
+    def __init__(self, input_dim: int, latent_dim: int):
+        super().__init__()
+        hidden_dim = sum([input_dim, latent_dim]) // 2
+        self.encoder_layer1 = nn.Linear(input_dim, hidden_dim)
+        self.encoder_layer2 = nn.Linear(hidden_dim, latent_dim)
+        self.decoder_bias1 = nn.Parameter(torch.zeros(hidden_dim))
+        self.decoder_bias2 = nn.Parameter(torch.zeros(input_dim))
+
+    def forward(self, x):
+        """
+        Forward pass through the autoencoder.
+
+        Returns:
+            - reconstructed: The reconstructed input.
+            - latent: The latent representation of the input.
+        """
+        # Encoder
+        x = torch.relu(self.encoder_layer1(x))
+        latent = torch.relu(self.encoder_layer2(x))
+
+        # Decoder with shared weights
+        x = torch.relu(torch.matmul(latent, self.encoder_layer2.weight) + self.decoder_bias1)
+        reconstructed = torch.sigmoid(torch.matmul(x, self.encoder_layer1.weight) + self.decoder_bias2)
+
         return reconstructed, latent
 
     def reconstruction_loss(self, x):
@@ -197,15 +280,15 @@ class DatasetDistillation(pl.LightningModule):
         reconstruction_scale: float = 1.0,
         gradient_penalty_scale: float = 1.0,
         diversity_scale: float = 1.0,
-        increase_reconstruction_over: int = 1,
-        increase_diversity_over: int = 1,
+        schedule_reconstruction_weight: list = [0, 0],  # [increase_epochs, decrease_epochs] ; 0 for no change -> constant = 1
+        schedule_diversity_weight: list = [0, 0],  # [increase_epochs, decrease_epochs] ; 0 for no change -> constant = 1
         weight_decay: float = 1e-4,
         learning_rate_ae: float = 1e-3,
         learning_rate_distill: float = 1e-4,
         training_mode: Literal["pretrain", "distillation"] = "distillation",
         log_image_every: int = 10,
         feature_extractor_cls: Literal[
-            "Autoencoder", "WeightSharedAutoencoder", "GRBM"
+            "Autoencoder", "WeightSharedAutoencoder", "Autoencoder2L", "WeightSharedAutoencoder2L", "GRBM"
         ] = "WeightSharedAutoencoder",
         model_head_cls: Literal["LinearClassifier"] = "LinearClassifier",
     ):
@@ -216,6 +299,8 @@ class DatasetDistillation(pl.LightningModule):
         feature_extractor_cls = {
             "Autoencoder": Autoencoder,
             "WeightSharedAutoencoder": WeightSharedAutoencoder,
+            "Autoencoder2L": Autoencoder2L,
+            "WeightSharedAutoencoder2L": WeightSharedAutoencoder2L,
             "GRBM": GRBM,
         }[feature_extractor_cls]
         self.feature_extractor = feature_extractor_cls(input_dim, latent_dim)
@@ -237,8 +322,20 @@ class DatasetDistillation(pl.LightningModule):
         self.reconstruction_scale = reconstruction_scale
         self.gradient_penalty_scale = gradient_penalty_scale
         self.diversity_scale = diversity_scale
-        self.increase_reconstruction_over = increase_reconstruction_over
-        self.increase_diversity_over = increase_diversity_over
+
+        # Schedule for increasing and decreasing the reconstruction weight
+        increase_epochs = schedule_reconstruction_weight[0]
+        decrease_epochs = schedule_reconstruction_weight[1]
+        increase_weights = np.linspace(1e-3, 1, increase_epochs, endpoint=False)
+        decrease_weights = np.linspace(1, 1e-3, decrease_epochs + 1)[1:]
+        self.schedule_reconstruction_weight = np.concatenate([increase_weights, [1.], decrease_weights])
+
+        # Schedule for increasing and decreasing the diversity weight
+        increase_epochs = schedule_diversity_weight[0]
+        decrease_epochs = schedule_diversity_weight[1]
+        increase_weights = np.linspace(1e-3, 1, increase_epochs, endpoint=False)
+        decrease_weights = np.linspace(1, 1e-3, decrease_epochs + 1)[1:]
+        self.schedule_diversity_weight = np.concatenate([increase_weights, [1.], decrease_weights])
 
         # Learning rates and weight decay
         self.weight_decay = weight_decay
@@ -435,18 +532,17 @@ class DatasetDistillation(pl.LightningModule):
             )
 
             # Increase weights over time
-            reconstruction_weight = min(
-                1, ((self.current_epoch + 1) / self.increase_reconstruction_over)
-            )
+            reconstruction_weight_index = min(self.current_epoch, len(self.schedule_reconstruction_weight) - 1)
+            reconstruction_weight = self.schedule_reconstruction_weight[reconstruction_weight_index]
             self.log(
                 "train_reconstruction_weight",
                 reconstruction_weight,
                 on_step=False,
                 on_epoch=True,
             )
-            diversity_weight = min(
-                1, ((self.current_epoch + 1) / self.increase_diversity_over)
-            )
+
+            diversity_weight_index = min(self.current_epoch, len(self.schedule_diversity_weight) - 1)
+            diversity_weight = self.schedule_diversity_weight[diversity_weight_index]
             self.log(
                 "train_diversity_weight", diversity_weight, on_step=False, on_epoch=True
             )
